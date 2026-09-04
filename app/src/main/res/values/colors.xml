@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="rose_50">#FFF7F9</color>
+    <color name="rose_100">#FFE4EC</color>
+    <color name="rose_500">#D94F78</color>
+    <color name="rose_700">#A92F56</color>
+    <color name="ink">#27212A</color>
+    <color name="muted">#746B73</color>
+    <color name="white">#FFFFFF</color>
+</resources>
