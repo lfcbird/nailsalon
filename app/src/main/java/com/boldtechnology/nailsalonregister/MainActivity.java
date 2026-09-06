@@ -15,6 +15,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CalendarView;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -27,6 +28,7 @@ import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,11 +49,13 @@ public final class MainActivity extends Activity {
     private Button saleTab;
     private Button historyTab;
     private Button servicesTab;
+    private long selectedHistoryDay;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         database = new SalonDatabase(this);
+        selectedHistoryDay = startOfDay(System.currentTimeMillis());
         configureWindow();
         setContentView(buildShell());
         showNewSale();
@@ -324,6 +328,8 @@ public final class MainActivity extends Activity {
                 } else {
                     database.reviseSale(existing, customer, selected, subtotal, tip, paymentMethod);
                 }
+                selectedHistoryDay = startOfDay(existing == null
+                        ? System.currentTimeMillis() : existing.createdAt);
                 showReceipt(existing != null, customer, summary, subtotal, tip, paymentMethod);
             } catch (IllegalStateException error) {
                 Toast.makeText(this, error.getMessage(), Toast.LENGTH_LONG).show();
@@ -387,7 +393,40 @@ public final class MainActivity extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout page = page();
-        page.addView(sectionTitle("Payment history"));
+
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.HORIZONTAL);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.addView(sectionTitle("Daily history"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button today = tinyButton("Today");
+        today.setOnClickListener(v -> {
+            selectedHistoryDay = startOfDay(System.currentTimeMillis());
+            showHistory();
+        });
+        heading.addView(today, wrap());
+        page.addView(heading, matchWrap());
+
+        CalendarView calendar = new CalendarView(this);
+        calendar.setShowWeekNumber(false);
+        calendar.setDate(selectedHistoryDay, false, true);
+        calendar.setOnDateChangeListener((view, year, month, dayOfMonth) -> {
+            Calendar selected = Calendar.getInstance();
+            selected.clear();
+            selected.set(year, month, dayOfMonth, 0, 0, 0);
+            selectedHistoryDay = selected.getTimeInMillis();
+            showHistory();
+        });
+        LinearLayout calendarCard = card();
+        calendarCard.setPadding(dp(5), dp(2), dp(5), dp(2));
+        calendarCard.addView(calendar, matchWrap());
+        LinearLayout.LayoutParams calendarParams = cardParams();
+        calendarParams.topMargin = dp(12);
+        calendarParams.bottomMargin = dp(14);
+        page.addView(calendarCard, calendarParams);
+
+        long nextHistoryDay = nextDayStart(selectedHistoryDay);
+        SimpleDateFormat selectedDateFormat = new SimpleDateFormat("EEEE, MMMM d, yyyy", Locale.US);
 
         LinearLayout summary = new LinearLayout(this);
         summary.setOrientation(LinearLayout.HORIZONTAL);
@@ -397,23 +436,30 @@ public final class MainActivity extends Activity {
 
         LinearLayout summaryWords = new LinearLayout(this);
         summaryWords.setOrientation(LinearLayout.VERTICAL);
-        summaryWords.addView(text("TODAY'S TOTAL", 12, ROSE_DARK, Typeface.BOLD));
-        TextView count = text(database.getTodayCount() + " saved payment(s)", 13, MUTED, Typeface.NORMAL);
+        summaryWords.addView(text("DAY TOTAL", 12, ROSE_DARK, Typeface.BOLD));
+        TextView selectedDate = text(selectedDateFormat.format(new Date(selectedHistoryDay)),
+                13, INK, Typeface.BOLD);
+        LinearLayout.LayoutParams selectedDateParams = matchWrap();
+        selectedDateParams.topMargin = dp(3);
+        summaryWords.addView(selectedDate, selectedDateParams);
+        TextView count = text(database.getDayCount(selectedHistoryDay, nextHistoryDay)
+                + " saved payment(s)", 12, MUTED, Typeface.NORMAL);
         LinearLayout.LayoutParams countParams = matchWrap();
         countParams.topMargin = dp(3);
         summaryWords.addView(count, countParams);
         summary.addView(summaryWords, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        summary.addView(text(Money.format(database.getTodayTotal()), 28, ROSE_DARK, Typeface.BOLD));
+        summary.addView(text(Money.format(database.getDayTotal(selectedHistoryDay, nextHistoryDay)),
+                28, ROSE_DARK, Typeface.BOLD));
 
         LinearLayout.LayoutParams summaryParams = matchWrap();
         summaryParams.topMargin = dp(13);
         summaryParams.bottomMargin = dp(20);
         page.addView(summary, summaryParams);
 
-        List<SaleItem> sales = database.getRecentSales(200);
+        List<SaleItem> sales = database.getSalesForDay(selectedHistoryDay, nextHistoryDay, 200);
         if (sales.isEmpty()) {
             LinearLayout empty = card();
-            TextView emptyText = text("No saved payments yet.\nYour first sale will appear here.",
+            TextView emptyText = text("No saved services for this day.",
                     15, MUTED, Typeface.NORMAL);
             emptyText.setGravity(Gravity.CENTER);
             emptyText.setPadding(dp(24), dp(40), dp(24), dp(40));
@@ -467,6 +513,12 @@ public final class MainActivity extends Activity {
                     actions.addView(changes, changesParams);
                     changes.setOnClickListener(v -> showRevisionHistory(sale));
                 }
+                Button delete = tinyButton("Delete");
+                delete.setTextColor(Color.rgb(153, 48, 56));
+                LinearLayout.LayoutParams deleteParams = wrap();
+                deleteParams.leftMargin = dp(7);
+                actions.addView(delete, deleteParams);
+                delete.setOnClickListener(v -> confirmRemoveSale(sale));
                 LinearLayout.LayoutParams actionsParams = matchWrap();
                 actionsParams.topMargin = dp(11);
                 saleCard.addView(actions, actionsParams);
@@ -485,6 +537,30 @@ public final class MainActivity extends Activity {
 
         scroll.addView(page);
         content.addView(scroll, matchMatch());
+    }
+
+    private void confirmRemoveSale(SaleItem sale) {
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Delete saved service?")
+                .setMessage("Customer " + sale.customerId + " · " + Money.format(sale.totalCents)
+                        + "\n\nThis record will be removed from the calendar and daily total.")
+                .setPositiveButton("Delete", (ignored, which) -> {
+                    try {
+                        database.removeSale(sale);
+                        Toast.makeText(this, "Saved service deleted", Toast.LENGTH_SHORT).show();
+                        showHistory();
+                    } catch (IllegalStateException error) {
+                        Toast.makeText(this, error.getMessage(), Toast.LENGTH_LONG).show();
+                        showHistory();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Color.rgb(153, 48, 56));
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(MUTED);
+        });
+        dialog.show();
     }
 
     private void showRevisionHistory(SaleItem currentSale) {
@@ -943,6 +1019,23 @@ public final class MainActivity extends Activity {
     private LinearLayout.LayoutParams wrap() {
         return new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private static long startOfDay(long timestamp) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(timestamp);
+        calendar.set(Calendar.HOUR_OF_DAY, 0);
+        calendar.set(Calendar.MINUTE, 0);
+        calendar.set(Calendar.SECOND, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+        return calendar.getTimeInMillis();
+    }
+
+    private static long nextDayStart(long dayStart) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(dayStart);
+        calendar.add(Calendar.DAY_OF_MONTH, 1);
+        return calendar.getTimeInMillis();
     }
 
     private int dp(int value) {

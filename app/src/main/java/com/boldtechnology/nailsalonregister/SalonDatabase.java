@@ -11,7 +11,7 @@ import java.util.List;
 
 public final class SalonDatabase extends SQLiteOpenHelper {
     private static final String DB_NAME = "nail_salon.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
 
     public SalonDatabase(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -49,7 +49,8 @@ public final class SalonDatabase extends SQLiteOpenHelper {
                 "total_cents INTEGER NOT NULL," +
                 "payment_method TEXT NOT NULL," +
                 "created_at INTEGER NOT NULL," +
-                "updated_at INTEGER NOT NULL)");
+                "updated_at INTEGER NOT NULL," +
+                "deleted_at INTEGER NOT NULL DEFAULT 0)");
         db.execSQL("CREATE TABLE sale_services (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "sale_id INTEGER NOT NULL," +
@@ -57,6 +58,7 @@ public final class SalonDatabase extends SQLiteOpenHelper {
                 "service_name TEXT NOT NULL," +
                 "price_cents INTEGER NOT NULL)");
         db.execSQL("CREATE INDEX idx_sales_current_created ON sales(is_current, created_at)");
+        db.execSQL("CREATE INDEX idx_sales_calendar ON sales(is_current, deleted_at, created_at)");
         db.execSQL("CREATE INDEX idx_sales_group_revision ON sales(sale_group_id, revision_number)");
         db.execSQL("CREATE INDEX idx_sale_services_sale ON sale_services(sale_id)");
     }
@@ -82,6 +84,11 @@ public final class SalonDatabase extends SQLiteOpenHelper {
             db.execSQL("CREATE INDEX idx_sales_current_created ON sales(is_current, created_at)");
             db.execSQL("CREATE INDEX idx_sales_group_revision ON sales(sale_group_id, revision_number)");
             db.execSQL("CREATE INDEX idx_sale_services_sale ON sale_services(sale_id)");
+        }
+        if (oldVersion < 3) {
+            // A removed sale is hidden from the calendar, while its rows remain available for audit.
+            db.execSQL("ALTER TABLE sales ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("CREATE INDEX idx_sales_calendar ON sales(is_current, deleted_at, created_at)");
         }
     }
 
@@ -153,9 +160,9 @@ public final class SalonDatabase extends SQLiteOpenHelper {
             long groupId;
             long createdAt;
             try (Cursor cursor = db.query("sales",
-                    new String[]{"sale_group_id", "revision_number", "created_at", "is_current"},
+                    new String[]{"sale_group_id", "revision_number", "created_at", "is_current", "deleted_at"},
                     "id = ?", new String[]{String.valueOf(previous.id)}, null, null, null)) {
-                if (!cursor.moveToFirst() || cursor.getInt(3) != 1) {
+                if (!cursor.moveToFirst() || cursor.getInt(3) != 1 || cursor.getLong(4) != 0) {
                     throw new IllegalStateException("This payment already has a newer revision");
                 }
                 groupId = cursor.getLong(0);
@@ -223,19 +230,47 @@ public final class SalonDatabase extends SQLiteOpenHelper {
         return result;
     }
 
-    public List<SaleItem> getRecentSales(int limit) {
-        return querySales("s.is_current = 1", null, "s.created_at DESC", String.valueOf(limit));
+    public List<SaleItem> getSalesForDay(long dayStart, long nextDayStart, int limit) {
+        return querySales("s.is_current = 1 AND s.deleted_at = 0 " +
+                        "AND s.created_at >= ? AND s.created_at < ?",
+                new String[]{String.valueOf(dayStart), String.valueOf(nextDayStart)},
+                "s.created_at DESC", String.valueOf(limit));
     }
 
     public List<SaleItem> getSaleRevisions(long groupId) {
-        return querySales("s.sale_group_id = ?", new String[]{String.valueOf(groupId)},
+        return querySales("s.sale_group_id = ? AND s.deleted_at = 0",
+                new String[]{String.valueOf(groupId)},
                 "s.revision_number DESC", null);
+    }
+
+    public void removeSale(SaleItem sale) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            long groupId;
+            try (Cursor cursor = db.query("sales", new String[]{"sale_group_id"},
+                    "id = ? AND is_current = 1 AND deleted_at = 0",
+                    new String[]{String.valueOf(sale.id)}, null, null, null)) {
+                if (!cursor.moveToFirst()) {
+                    throw new IllegalStateException("This payment was already changed or removed");
+                }
+                groupId = cursor.getLong(0);
+            }
+            ContentValues values = new ContentValues();
+            values.put("deleted_at", System.currentTimeMillis());
+            db.update("sales", values, "sale_group_id = ? AND deleted_at = 0",
+                    new String[]{String.valueOf(groupId)});
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
     }
 
     private List<SaleItem> querySales(String selection, String[] args, String orderBy, String limit) {
         List<SaleItem> result = new ArrayList<>();
         String sql = "SELECT s.id, s.sale_group_id, s.revision_number, " +
-                "(SELECT COUNT(*) FROM sales r WHERE r.sale_group_id = s.sale_group_id), " +
+                "(SELECT COUNT(*) FROM sales r WHERE r.sale_group_id = s.sale_group_id " +
+                "AND r.deleted_at = 0), " +
                 "s.customer_id, s.service_summary, s.subtotal_cents, s.tip_cents, s.total_cents, " +
                 "s.payment_method, s.created_at, s.updated_at FROM sales s WHERE " + selection +
                 " ORDER BY " + orderBy + (limit == null ? "" : " LIMIT " + limit);
@@ -250,21 +285,21 @@ public final class SalonDatabase extends SQLiteOpenHelper {
         return result;
     }
 
-    public long getTodayTotal() {
-        long start = startOfToday();
+    public long getDayTotal(long dayStart, long nextDayStart) {
         try (Cursor cursor = getReadableDatabase().rawQuery(
                 "SELECT COALESCE(SUM(total_cents), 0) FROM sales " +
-                        "WHERE is_current = 1 AND created_at >= ?",
-                new String[]{String.valueOf(start)})) {
+                        "WHERE is_current = 1 AND deleted_at = 0 " +
+                        "AND created_at >= ? AND created_at < ?",
+                new String[]{String.valueOf(dayStart), String.valueOf(nextDayStart)})) {
             return cursor.moveToFirst() ? cursor.getLong(0) : 0;
         }
     }
 
-    public int getTodayCount() {
-        long start = startOfToday();
+    public int getDayCount(long dayStart, long nextDayStart) {
         try (Cursor cursor = getReadableDatabase().rawQuery(
-                "SELECT COUNT(*) FROM sales WHERE is_current = 1 AND created_at >= ?",
-                new String[]{String.valueOf(start)})) {
+                "SELECT COUNT(*) FROM sales WHERE is_current = 1 AND deleted_at = 0 " +
+                        "AND created_at >= ? AND created_at < ?",
+                new String[]{String.valueOf(dayStart), String.valueOf(nextDayStart)})) {
             return cursor.moveToFirst() ? cursor.getInt(0) : 0;
         }
     }
@@ -280,12 +315,4 @@ public final class SalonDatabase extends SQLiteOpenHelper {
         return builder.toString();
     }
 
-    private static long startOfToday() {
-        java.util.Calendar calendar = java.util.Calendar.getInstance();
-        calendar.set(java.util.Calendar.HOUR_OF_DAY, 0);
-        calendar.set(java.util.Calendar.MINUTE, 0);
-        calendar.set(java.util.Calendar.SECOND, 0);
-        calendar.set(java.util.Calendar.MILLISECOND, 0);
-        return calendar.getTimeInMillis();
-    }
 }

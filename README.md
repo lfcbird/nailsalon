@@ -12,13 +12,14 @@ A small offline Android checkout app for a nail salon. It keeps all customer and
 - Save up to 200 recent payments in the visible history (the database keeps all records)
 - Edit a saved payment without losing its original version
 - Review every immutable revision with **View changes**
-- Show today's payment count and total
+- Choose a date on the calendar and see only that day's services, count, and total
+- Delete an incorrect saved payment from the calendar and daily total
 - Add, edit, and remove services and prices from the phone
 - Preserve the original names and prices in historical payments after later service edits
 
 ## Install the ready APK
 
-1. Copy `release/NailSalonRegister-v1.1.0.apk` to the Android phone.
+1. Copy `release/NailSalonRegister-v1.2.0.apk` to the Android phone.
 2. Open the file on the phone.
 3. If Android asks, allow **Install unknown apps** for the browser or file manager being used.
 4. Tap **Install**, then open **Nail Salon Register**.
@@ -27,9 +28,11 @@ The APK is a test-signed private build intended for direct installation and test
 
 The signing key is intentionally not committed to this public repository. Use a new protected release key before any Google Play publication. An APK rebuilt with a different key cannot update the included test APK without uninstalling the earlier installation first.
 
-## Updating from version 1.0.0
+## Updating an existing installation
 
-Install version 1.1.0 over the existing app without uninstalling it. The database is upgraded in place, and existing payment history remains on the phone. Uninstalling first can remove local data.
+Install version 1.2.0 over the existing app without uninstalling it. The database is upgraded in place, and existing payment history remains on the phone. Uninstalling first can remove local data.
+
+Deleting a saved payment hides it from the calendar and daily totals. Its underlying database rows are retained instead of being physically erased, so editing and deletion never overwrite the audit trail.
 
 ## Important payment note
 
