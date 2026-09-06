@@ -6,7 +6,9 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -132,16 +134,40 @@ public final class MainActivity extends Activity {
     }
 
     private void showNewSale() {
-        setActiveTab(saleTab);
+        showSaleForm(null);
+    }
+
+    private void showEditSale(SaleItem existing) {
+        showSaleForm(existing);
+    }
+
+    private void showSaleForm(SaleItem existing) {
+        setActiveTab(existing == null ? saleTab : historyTab);
         content.removeAllViews();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         LinearLayout page = page();
 
-        page.addView(sectionTitle("New customer sale"));
-        TextView help = text("Enter a customer ID, choose every service, then save the payment.",
-                14, MUTED, Typeface.NORMAL);
+        if (existing == null) {
+            page.addView(sectionTitle("New customer sale"));
+        } else {
+            LinearLayout heading = new LinearLayout(this);
+            heading.setOrientation(LinearLayout.HORIZONTAL);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            heading.addView(sectionTitle("Edit saved sale"),
+                    new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            Button back = tinyButton("Back");
+            back.setOnClickListener(v -> showHistory());
+            heading.addView(back, wrap());
+            page.addView(heading, matchWrap());
+        }
+
+        TextView help = text(existing == null
+                        ? "Enter a customer ID, choose every service, add a tip, then save."
+                        : "Saving creates a new revision. The original record will stay in history.",
+                14, existing == null ? MUTED : ROSE_DARK,
+                existing == null ? Typeface.NORMAL : Typeface.BOLD);
         LinearLayout.LayoutParams helpParams = matchWrap();
         helpParams.topMargin = dp(5);
         helpParams.bottomMargin = dp(18);
@@ -150,6 +176,9 @@ public final class MainActivity extends Activity {
         EditText customerId = input("Customer ID  (example: C-1024)");
         customerId.setSingleLine(true);
         customerId.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        if (existing != null) {
+            customerId.setText(existing.customerId);
+        }
         page.addView(fieldLabel("CUSTOMER ID"));
         page.addView(customerId, fieldParams());
 
@@ -158,10 +187,21 @@ public final class MainActivity extends Activity {
         serviceLabelParams.topMargin = dp(17);
         page.addView(servicesLabel, serviceLabelParams);
 
+        EditText tipInput = input("0.00");
+        tipInput.setSingleLine(true);
+        tipInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        if (existing != null && existing.tipCents > 0) {
+            tipInput.setText(String.format(Locale.US, "%.2f", existing.tipCents / 100.0));
+        }
+
         LinearLayout serviceCard = card();
-        List<ServiceItem> services = database.getServices();
+        List<ServiceItem> savedServices = existing == null
+                ? new ArrayList<>() : database.getSaleServices(existing);
+        List<ServiceItem> services = mergeServicesForEdit(database.getServices(), savedServices);
         Map<CheckBox, ServiceItem> choices = new LinkedHashMap<>();
         TextView totalValue = text(Money.format(0), 32, ROSE_DARK, Typeface.BOLD);
+        TextView breakdownValue = text("Services " + Money.format(0) + "  +  Tip " + Money.format(0),
+                12, MUTED, Typeface.NORMAL);
 
         if (services.isEmpty()) {
             TextView none = text("No services yet. Add one from the Services tab.", 14, MUTED, Typeface.NORMAL);
@@ -179,8 +219,9 @@ public final class MainActivity extends Activity {
                 box.setPadding(dp(12), dp(8), dp(12), dp(8));
                 box.setMinHeight(dp(54));
                 choices.put(box, service);
+                box.setChecked(existing != null && matchesAnySavedService(service, savedServices));
                 box.setOnCheckedChangeListener((buttonView, isChecked) ->
-                        totalValue.setText(Money.format(selectedTotal(choices))));
+                        updateSaleTotals(totalValue, breakdownValue, choices, tipInput));
                 serviceCard.addView(box, matchWrap());
                 if (index < services.size() - 1) {
                     serviceCard.addView(divider());
@@ -189,14 +230,34 @@ public final class MainActivity extends Activity {
         }
         page.addView(serviceCard, cardParams());
 
+        TextView tipLabel = fieldLabel("TIP ($)");
+        LinearLayout.LayoutParams tipLabelParams = matchWrap();
+        tipLabelParams.topMargin = dp(17);
+        page.addView(tipLabel, tipLabelParams);
+        page.addView(tipInput, fieldParams());
+
+        tipInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                updateSaleTotals(totalValue, breakdownValue, choices, tipInput);
+            }
+            @Override public void afterTextChanged(Editable s) {}
+        });
+
         LinearLayout totalCard = new LinearLayout(this);
-        totalCard.setOrientation(LinearLayout.HORIZONTAL);
-        totalCard.setGravity(Gravity.CENTER_VERTICAL);
-        totalCard.setPadding(dp(18), dp(17), dp(18), dp(17));
+        totalCard.setOrientation(LinearLayout.VERTICAL);
+        totalCard.setPadding(dp(18), dp(14), dp(18), dp(14));
         totalCard.setBackground(rounded(ROSE_PALE, 18, Color.TRANSPARENT, 0));
-        TextView totalLabel = text("TOTAL", 13, ROSE_DARK, Typeface.BOLD);
-        totalCard.addView(totalLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        totalCard.addView(totalValue, wrap());
+        LinearLayout totalRow = new LinearLayout(this);
+        totalRow.setOrientation(LinearLayout.HORIZONTAL);
+        totalRow.setGravity(Gravity.CENTER_VERTICAL);
+        totalRow.addView(text("TOTAL", 13, ROSE_DARK, Typeface.BOLD),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        totalRow.addView(totalValue, wrap());
+        totalCard.addView(totalRow, matchWrap());
+        LinearLayout.LayoutParams breakdownParams = matchWrap();
+        breakdownParams.topMargin = dp(3);
+        totalCard.addView(breakdownValue, breakdownParams);
         LinearLayout.LayoutParams totalParams = matchWrap();
         totalParams.topMargin = dp(14);
         page.addView(totalCard, totalParams);
@@ -218,13 +279,16 @@ public final class MainActivity extends Activity {
             radio.setButtonTintList(android.content.res.ColorStateList.valueOf(ROSE));
             radio.setId(View.generateViewId());
             paymentGroup.addView(radio, new RadioGroup.LayoutParams(0, dp(50), 1f));
-            if (i == 0) {
+            if ((existing == null && i == 0)
+                    || (existing != null && methods[i].equals(existing.paymentMethod))) {
                 paymentGroup.check(radio.getId());
             }
         }
         page.addView(paymentGroup, fieldParams());
 
-        Button save = primaryButton("Save Payment");
+        updateSaleTotals(totalValue, breakdownValue, choices, tipInput);
+
+        Button save = primaryButton(existing == null ? "Save Payment" : "Save Revision");
         LinearLayout.LayoutParams saveParams = matchWrap();
         saveParams.topMargin = dp(19);
         saveParams.bottomMargin = dp(28);
@@ -242,24 +306,37 @@ public final class MainActivity extends Activity {
                 Toast.makeText(this, "Select at least one service", Toast.LENGTH_SHORT).show();
                 return;
             }
+            final long tip;
+            try {
+                tip = optionalMoney(tipInput.getText().toString());
+            } catch (RuntimeException error) {
+                tipInput.setError("Enter a valid tip");
+                tipInput.requestFocus();
+                return;
+            }
+            long subtotal = selectedTotal(choices);
             RadioButton checked = paymentGroup.findViewById(paymentGroup.getCheckedRadioButtonId());
             String paymentMethod = checked == null ? "Cash" : checked.getText().toString();
-            long total = 0;
-            List<String> summaryParts = new ArrayList<>();
-            for (ServiceItem item : selected) {
-                total += item.priceCents;
-                summaryParts.add(item.name + " (" + Money.format(item.priceCents) + ")");
+            String summary = summarizeServices(selected);
+            try {
+                if (existing == null) {
+                    database.saveSale(customer, selected, subtotal, tip, paymentMethod);
+                } else {
+                    database.reviseSale(existing, customer, selected, subtotal, tip, paymentMethod);
+                }
+                showReceipt(existing != null, customer, summary, subtotal, tip, paymentMethod);
+            } catch (IllegalStateException error) {
+                Toast.makeText(this, error.getMessage(), Toast.LENGTH_LONG).show();
+                showHistory();
             }
-            String summary = join(summaryParts, ", ");
-            database.saveSale(customer, summary, total, paymentMethod);
-            showReceipt(customer, summary, total, paymentMethod);
         });
 
         scroll.addView(page);
         content.addView(scroll, matchMatch());
     }
 
-    private void showReceipt(String customer, String summary, long total, String paymentMethod) {
+    private void showReceipt(boolean revised, String customer, String summary, long subtotal,
+                             long tip, String paymentMethod) {
         LinearLayout receipt = new LinearLayout(this);
         receipt.setOrientation(LinearLayout.VERTICAL);
         receipt.setPadding(dp(22), dp(6), dp(22), 0);
@@ -268,7 +345,13 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams detailsParams = matchWrap();
         detailsParams.topMargin = dp(9);
         receipt.addView(details, detailsParams);
-        TextView totalText = text("Total paid: " + Money.format(total), 23, ROSE_DARK, Typeface.BOLD);
+        TextView amounts = text("Services: " + Money.format(subtotal) + "  •  Tip: " + Money.format(tip),
+                14, MUTED, Typeface.NORMAL);
+        LinearLayout.LayoutParams amountsParams = matchWrap();
+        amountsParams.topMargin = dp(12);
+        receipt.addView(amounts, amountsParams);
+        TextView totalText = text("Total paid: " + Money.format(subtotal + tip),
+                23, ROSE_DARK, Typeface.BOLD);
         LinearLayout.LayoutParams totalParams = matchWrap();
         totalParams.topMargin = dp(18);
         receipt.addView(totalText, totalParams);
@@ -278,7 +361,7 @@ public final class MainActivity extends Activity {
         receipt.addView(method, methodParams);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Payment saved")
+                .setTitle(revised ? "Revision saved" : "Payment saved")
                 .setView(receipt)
                 .setPositiveButton("New Sale", null)
                 .setNegativeButton("View History", null)
@@ -355,11 +438,38 @@ public final class MainActivity extends Activity {
                 serviceParams.topMargin = dp(7);
                 saleCard.addView(serviceNames, serviceParams);
 
-                TextView metadata = text(format.format(new Date(sale.createdAt)) + "  •  " + sale.paymentMethod,
+                TextView amounts = text("Services " + Money.format(sale.subtotalCents)
+                                + "  +  Tip " + Money.format(sale.tipCents),
+                        12, MUTED, Typeface.NORMAL);
+                LinearLayout.LayoutParams amountsParams = matchWrap();
+                amountsParams.topMargin = dp(7);
+                saleCard.addView(amounts, amountsParams);
+
+                String revisionLabel = sale.revisionCount > 1
+                        ? "  •  Edited · Revision " + sale.revisionNumber : "";
+                TextView metadata = text(format.format(new Date(sale.createdAt)) + "  •  "
+                                + sale.paymentMethod + revisionLabel,
                         12, MUTED, Typeface.NORMAL);
                 LinearLayout.LayoutParams metadataParams = matchWrap();
                 metadataParams.topMargin = dp(10);
                 saleCard.addView(metadata, metadataParams);
+
+                LinearLayout actions = new LinearLayout(this);
+                actions.setOrientation(LinearLayout.HORIZONTAL);
+                actions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+                Button edit = tinyButton("Edit");
+                edit.setOnClickListener(v -> showEditSale(sale));
+                actions.addView(edit, wrap());
+                if (sale.revisionCount > 1) {
+                    Button changes = tinyButton("View changes (" + sale.revisionCount + ")");
+                    LinearLayout.LayoutParams changesParams = wrap();
+                    changesParams.leftMargin = dp(7);
+                    actions.addView(changes, changesParams);
+                    changes.setOnClickListener(v -> showRevisionHistory(sale));
+                }
+                LinearLayout.LayoutParams actionsParams = matchWrap();
+                actionsParams.topMargin = dp(11);
+                saleCard.addView(actions, actionsParams);
 
                 LinearLayout.LayoutParams saleParams = cardParams();
                 saleParams.bottomMargin = dp(10);
@@ -375,6 +485,88 @@ public final class MainActivity extends Activity {
 
         scroll.addView(page);
         content.addView(scroll, matchMatch());
+    }
+
+    private void showRevisionHistory(SaleItem currentSale) {
+        List<SaleItem> revisions = database.getSaleRevisions(currentSale.groupId);
+        SimpleDateFormat format = new SimpleDateFormat("MMM d, yyyy  •  h:mm a", Locale.US);
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(20), dp(5), dp(20), dp(12));
+
+        TextView explanation = text(
+                "Every saved version is kept. The current version is shown first.",
+                13, MUTED, Typeface.NORMAL);
+        LinearLayout.LayoutParams explanationParams = matchWrap();
+        explanationParams.bottomMargin = dp(12);
+        list.addView(explanation, explanationParams);
+
+        for (int index = 0; index < revisions.size(); index++) {
+            SaleItem revision = revisions.get(index);
+            boolean isCurrent = index == 0;
+            LinearLayout revisionCard = card();
+            revisionCard.setPadding(dp(14), dp(12), dp(14), dp(12));
+            if (isCurrent) {
+                revisionCard.setBackground(rounded(ROSE_PALE, 16, ROSE, 1));
+            }
+
+            String title;
+            if (isCurrent) {
+                title = "Current · Revision " + revision.revisionNumber;
+            } else if (revision.revisionNumber == 1) {
+                title = "Original · Revision 1";
+            } else {
+                title = "Revision " + revision.revisionNumber;
+            }
+            revisionCard.addView(text(title, 14, isCurrent ? ROSE_DARK : INK, Typeface.BOLD));
+
+            TextView editedAt = text("Saved " + format.format(new Date(revision.updatedAt)),
+                    11, MUTED, Typeface.NORMAL);
+            LinearLayout.LayoutParams editedParams = matchWrap();
+            editedParams.topMargin = dp(3);
+            revisionCard.addView(editedAt, editedParams);
+
+            TextView customer = text("Customer: " + revision.customerId,
+                    14, INK, Typeface.BOLD);
+            LinearLayout.LayoutParams customerParams = matchWrap();
+            customerParams.topMargin = dp(9);
+            revisionCard.addView(customer, customerParams);
+
+            TextView services = text(revision.serviceSummary, 13, MUTED, Typeface.NORMAL);
+            LinearLayout.LayoutParams servicesParams = matchWrap();
+            servicesParams.topMargin = dp(5);
+            revisionCard.addView(services, servicesParams);
+
+            TextView totals = text("Services " + Money.format(revision.subtotalCents)
+                            + "  +  Tip " + Money.format(revision.tipCents)
+                            + "  =  " + Money.format(revision.totalCents),
+                    13, isCurrent ? ROSE_DARK : MUTED, Typeface.BOLD);
+            LinearLayout.LayoutParams totalsParams = matchWrap();
+            totalsParams.topMargin = dp(8);
+            revisionCard.addView(totals, totalsParams);
+
+            TextView payment = text("Payment: " + revision.paymentMethod,
+                    12, MUTED, Typeface.NORMAL);
+            LinearLayout.LayoutParams paymentParams = matchWrap();
+            paymentParams.topMargin = dp(4);
+            revisionCard.addView(payment, paymentParams);
+
+            LinearLayout.LayoutParams revisionParams = matchWrap();
+            revisionParams.bottomMargin = dp(9);
+            list.addView(revisionCard, revisionParams);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Saved changes")
+                .setView(scroll)
+                .setPositiveButton("Close", null)
+                .create();
+        dialog.setOnShowListener(ignored ->
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(ROSE_DARK));
+        dialog.show();
     }
 
     private void showServices() {
@@ -549,6 +741,57 @@ public final class MainActivity extends Activity {
             }
         }
         return selected;
+    }
+
+    private List<ServiceItem> mergeServicesForEdit(List<ServiceItem> activeServices,
+                                                   List<ServiceItem> savedServices) {
+        if (savedServices.isEmpty()) {
+            return activeServices;
+        }
+        List<ServiceItem> result = new ArrayList<>(savedServices);
+        for (ServiceItem active : activeServices) {
+            if (!matchesAnySavedService(active, savedServices)) {
+                result.add(active);
+            }
+        }
+        return result;
+    }
+
+    private boolean matchesAnySavedService(ServiceItem candidate, List<ServiceItem> savedServices) {
+        for (ServiceItem saved : savedServices) {
+            if ((candidate.id > 0 && saved.id > 0 && candidate.id == saved.id)
+                    || (candidate.name.equals(saved.name) && candidate.priceCents == saved.priceCents)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateSaleTotals(TextView totalValue, TextView breakdownValue,
+                                  Map<CheckBox, ServiceItem> choices, EditText tipInput) {
+        long subtotal = selectedTotal(choices);
+        long tip = 0;
+        try {
+            tip = optionalMoney(tipInput.getText().toString());
+        } catch (RuntimeException ignored) {
+            // Keep the total usable while the user is still typing an incomplete value.
+        }
+        totalValue.setText(Money.format(subtotal + tip));
+        breakdownValue.setText("Services " + Money.format(subtotal)
+                + "  +  Tip " + Money.format(tip));
+    }
+
+    private long optionalMoney(String value) {
+        String trimmed = value == null ? "" : value.trim();
+        return trimmed.isEmpty() ? 0 : Money.parseToCents(trimmed);
+    }
+
+    private String summarizeServices(List<ServiceItem> services) {
+        List<String> values = new ArrayList<>();
+        for (ServiceItem service : services) {
+            values.add(service.name + " (" + Money.format(service.priceCents) + ")");
+        }
+        return join(values, ", ");
     }
 
     private static String join(List<String> values, String separator) {
